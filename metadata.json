@@ -1,0 +1,7 @@
+{
+  "name": "Potter Padilla & Pfau Law Voice Concierge",
+  "description": "A sophisticated AI voice agent for Potter Padilla & Pfau, capable of answering legal service questions and scheduling consultations using Gemini 2.5 Native Audio.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
