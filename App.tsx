@@ -6,7 +6,7 @@ import { decode, decodeAudioData, createBlob } from './services/audio-utils';
 import { ConnectionStatus, Message, ConsultationDetails, Language } from './types';
 import VoiceVisualizer from './components/VoiceVisualizer';
 
-const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-09-2025';
+const MODEL_NAME = 'gemini-3.1-flash-live-preview';
 
 const scheduleConsultationDeclaration: FunctionDeclaration = {
   name: 'scheduleConsultation',
@@ -26,6 +26,7 @@ const scheduleConsultationDeclaration: FunctionDeclaration = {
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
+  const [errorMessage, setErrorMessage] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [consultation, setConsultation] = useState<Partial<ConsultationDetails> | null>(null);
@@ -46,11 +47,11 @@ const App: React.FC = () => {
       
       if (sessionRef.current) {
         sessionRef.current.sendToolResponse({
-          functionResponses: {
+          functionResponses: [{
             id: fc.id,
             name: fc.name,
             response: { result: "Consultation request recorded. I will inform the team at Potter Padilla & Pfau." },
-          }
+          }]
         });
       }
       
@@ -65,11 +66,23 @@ const App: React.FC = () => {
   const connectVoice = async () => {
     try {
       setStatus(ConnectionStatus.CONNECTING);
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      setErrorMessage('');
+      const apiKey = process.env.GEMINI_API_KEY || '';
+      if (!apiKey) {
+        throw new Error("API key is missing. Please ensure it is configured in the environment.");
+      }
+      const ai = new GoogleGenAI({ apiKey });
 
       const inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       audioContextRef.current = { input: inputAudioContext, output: outputAudioContext };
+
+      if (inputAudioContext.state === 'suspended') await inputAudioContext.resume();
+      if (outputAudioContext.state === 'suspended') await outputAudioContext.resume();
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Microphone access is not supported in this browser. Please ensure you are using a secure context (HTTPS) and a modern browser.");
+      }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
@@ -90,6 +103,12 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
+            
+            // Trigger the initial greeting
+            sessionPromise.then(session => {
+              session.sendRealtimeInput([{ text: "Hello." }]);
+            });
+
             const source = inputAudioContext.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1);
             
@@ -97,7 +116,7 @@ const App: React.FC = () => {
               const inputData = e.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
               sessionPromise.then(session => {
-                session.sendRealtimeInput({ media: pcmBlob });
+                session.sendRealtimeInput({ audio: pcmBlob });
               });
             };
             
@@ -150,6 +169,7 @@ const App: React.FC = () => {
           },
           onerror: (e) => {
             console.error('Voice Error:', e);
+            setErrorMessage(e instanceof Error ? e.message : String(e));
             setStatus(ConnectionStatus.ERROR);
           },
           onclose: () => {
@@ -161,6 +181,7 @@ const App: React.FC = () => {
       sessionRef.current = await sessionPromise;
     } catch (err) {
       console.error('Connection failed:', err);
+      setErrorMessage(err instanceof Error ? err.message : String(err));
       setStatus(ConnectionStatus.ERROR);
     }
   };
@@ -211,16 +232,19 @@ const App: React.FC = () => {
           <div className="glass-panel px-6 py-4 rounded-2xl mx-auto">
             {status === ConnectionStatus.IDLE && (
               <p className="text-gray-600 text-sm">
-                {language === 'English' && "Welcome to Potter Padilla & Pfau. I am here to help with Social Security or Employment Law questions."}
-                {language === 'Spanish' && "Bienvenido a Potter Padilla & Pfau. Estoy aquí para ayudar con preguntas sobre Seguro Social o Derecho Laboral."}
-                {language === 'German' && "Willkommen bei Potter Padilla & Pfau. Ich bin hier, um bei Fragen zur Sozialversicherung oder zum Arbeitsrecht zu helfen."}
+                {language === 'English' && "Welcome to Potter Padilla & Pfau. I'm here to find out about your legal situation and help schedule your free consultation."}
+                {language === 'Spanish' && "Bienvenido a Potter Padilla & Pfau. Estoy aquí para conocer su situación legal y ayudarle a programar su consulta gratuita."}
+                {language === 'German' && "Willkommen bei Potter Padilla & Pfau. Ich bin hier, um mehr über Ihre rechtliche Situation zu erfahren und Ihnen bei der Vereinbarung Ihrer kostenlosen Beratung zu helfen."}
               </p>
             )}
             {status === ConnectionStatus.CONNECTED && (
               <p className="text-blue-600 text-sm animate-pulse">Assistant is listening in {language}...</p>
             )}
             {status === ConnectionStatus.ERROR && (
-              <p className="text-red-600 text-sm">Connection failed. Please check permissions and try again.</p>
+              <div className="text-red-600 text-sm">
+                <p>Connection failed. Please check permissions and try again.</p>
+                {errorMessage && <p className="mt-2 text-xs opacity-80">{errorMessage}</p>}
+              </div>
             )}
           </div>
 
