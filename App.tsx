@@ -17,7 +17,7 @@ const scheduleConsultationDeclaration: FunctionDeclaration = {
       name: { type: Type.STRING, description: 'Full name of the client.' },
       phone: { type: Type.STRING, description: 'Contact phone number.' },
       email: { type: Type.STRING, description: 'Contact email address.' },
-      legalIssue: { type: Type.STRING, description: 'Brief description of the legal matter (e.g. workers comp, social security).' },
+      legalIssue: { type: Type.STRING, description: 'Brief description of the legal matter (e.g. social security, employment law).' },
       preferredDate: { type: Type.STRING, description: 'The user\'s preferred date or time for the consultation.' },
     },
     required: ['name', 'phone', 'legalIssue'],
@@ -178,14 +178,14 @@ const App: React.FC = () => {
     setIsSpeaking(false);
   };
 
-  const languages: Language[] = ['English', 'Spanish', 'Mandarin Chinese'];
+  const languages: Language[] = ['English', 'Spanish', 'German'];
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row overflow-hidden bg-[#050507]">
-      <div className="flex-1 flex flex-col items-center justify-center p-8 relative border-r border-white/5">
+    <div className="min-h-screen flex flex-col md:flex-row overflow-hidden bg-white">
+      <div className="flex-1 flex flex-col items-center justify-center p-8 relative border-r border-black/5">
         <header className="absolute top-8 text-center">
-          <h1 className="serif text-4xl font-bold text-yellow-500 mb-2">Potter Padilla & Pfau</h1>
-          <p className="text-gray-400 tracking-widest uppercase text-xs">Legal AI Concierge</p>
+          <h1 className="cinzel text-4xl font-bold text-[#1d4ed8] mb-2">Potter Padilla & Pfau</h1>
+          <p className="text-gray-500 tracking-widest uppercase text-xs">Legal AI Concierge</p>
         </header>
 
         <VoiceVisualizer isActive={status === ConnectionStatus.CONNECTED} isSpeaking={isSpeaking} />
@@ -199,28 +199,28 @@ const App: React.FC = () => {
                 disabled={status !== ConnectionStatus.IDLE}
                 className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-tighter transition-all ${
                   language === lang 
-                    ? 'bg-yellow-600 text-white shadow-lg shadow-yellow-900/20' 
-                    : 'bg-white/5 text-gray-500 hover:text-gray-300'
+                    ? 'bg-[#1d4ed8] text-white shadow-lg shadow-[#1d4ed8]/20' 
+                    : 'bg-black/5 text-gray-500 hover:text-gray-800'
                 } ${status !== ConnectionStatus.IDLE ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                {lang === 'Mandarin Chinese' ? 'Mandarin' : lang}
+                {lang}
               </button>
             ))}
           </div>
 
           <div className="glass-panel px-6 py-4 rounded-2xl mx-auto">
             {status === ConnectionStatus.IDLE && (
-              <p className="text-gray-400 text-sm">
-                {language === 'English' && "Welcome to Potter Padilla & Pfau. I am here to help with Social Security, Workers' Comp, or Employment Law questions."}
-                {language === 'Spanish' && "Bienvenido a Potter Padilla & Pfau. Estoy aquí para ayudar con preguntas sobre Seguro Social, Compensación al Trabajador o Derecho Laboral."}
-                {language === 'Mandarin Chinese' && "欢迎来到 Potter Padilla & Pfau。我可以协助解答有关社会保障、劳工赔偿或雇佣法的问题。"}
+              <p className="text-gray-600 text-sm">
+                {language === 'English' && "Welcome to Potter Padilla & Pfau. I am here to help with Social Security or Employment Law questions."}
+                {language === 'Spanish' && "Bienvenido a Potter Padilla & Pfau. Estoy aquí para ayudar con preguntas sobre Seguro Social o Derecho Laboral."}
+                {language === 'German' && "Willkommen bei Potter Padilla & Pfau. Ich bin hier, um bei Fragen zur Sozialversicherung oder zum Arbeitsrecht zu helfen."}
               </p>
             )}
             {status === ConnectionStatus.CONNECTED && (
-              <p className="text-blue-400 text-sm animate-pulse">Assistant is listening in {language}...</p>
+              <p className="text-blue-600 text-sm animate-pulse">Assistant is listening in {language}...</p>
             )}
             {status === ConnectionStatus.ERROR && (
-              <p className="text-red-400 text-sm">Connection failed. Please check permissions and try again.</p>
+              <p className="text-red-600 text-sm">Connection failed. Please check permissions and try again.</p>
             )}
           </div>
 
@@ -230,7 +230,7 @@ const App: React.FC = () => {
             className={`w-full px-12 py-4 rounded-full font-semibold transition-all duration-300 transform hover:scale-105 shadow-2xl ${
               status === ConnectionStatus.CONNECTED 
                 ? 'bg-red-600/20 text-red-400 border border-red-500/50 hover:bg-red-600/30'
-                : 'bg-yellow-600 text-white hover:bg-yellow-500 shadow-yellow-900/40'
+                : 'bg-[#1d4ed8] text-white hover:bg-blue-600 shadow-[#1d4ed8]/40'
             }`}
           >
             {status === ConnectionStatus.CONNECTED ? 'End Conversation' : status === ConnectionStatus.CONNECTING ? 'Connecting...' : 'Ask a Question'}
@@ -238,29 +238,29 @@ const App: React.FC = () => {
         </div>
 
         {consultation && (
-          <div className="mt-8 glass-panel p-6 rounded-2xl border-yellow-500/30 w-full max-w-md animate-in fade-in slide-in-from-bottom-4">
-            <h3 className="serif text-xl text-yellow-500 mb-4">Consultation Request Details</h3>
+          <div className="mt-8 glass-panel p-6 rounded-2xl border-[#1d4ed8]/30 w-full max-w-md animate-in fade-in slide-in-from-bottom-4">
+            <h3 className="serif text-xl text-[#1d4ed8] mb-4">Consultation Request Details</h3>
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
                 <p className="text-gray-500 uppercase text-[10px]">Client Name</p>
-                <p className="font-medium text-white">{consultation.name}</p>
+                <p className="font-medium text-gray-900">{consultation.name}</p>
               </div>
               <div>
                 <p className="text-gray-500 uppercase text-[10px]">Legal Issue</p>
-                <p className="font-medium text-white">{consultation.legalIssue}</p>
+                <p className="font-medium text-gray-900">{consultation.legalIssue}</p>
               </div>
               <div>
                 <p className="text-gray-500 uppercase text-[10px]">Phone</p>
-                <p className="font-medium text-white">{consultation.phone}</p>
+                <p className="font-medium text-gray-900">{consultation.phone}</p>
               </div>
               <div>
                 <p className="text-gray-500 uppercase text-[10px]">Preferred Date</p>
-                <p className="font-medium text-white">{consultation.preferredDate || 'Not specified'}</p>
+                <p className="font-medium text-gray-900">{consultation.preferredDate || 'Not specified'}</p>
               </div>
             </div>
             <button 
               onClick={() => setConsultation(null)}
-              className="mt-6 w-full py-2 bg-yellow-600/10 text-yellow-500 rounded-lg border border-yellow-500/20 hover:bg-yellow-600/20 transition-colors"
+              className="mt-6 w-full py-2 bg-[#1d4ed8]/10 text-[#1d4ed8] rounded-lg border border-[#1d4ed8]/20 hover:bg-[#1d4ed8]/20 transition-colors"
             >
               Confirm & Clear
             </button>
@@ -268,16 +268,16 @@ const App: React.FC = () => {
         )}
       </div>
 
-      <div className="w-full md:w-[400px] flex flex-col glass-panel border-l border-white/5">
-        <div className="p-6 border-b border-white/5 flex justify-between items-center bg-black/20">
-          <h2 className="serif text-xl">Transcripts</h2>
-          <button onClick={clearHistory} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">Clear History</button>
+      <div className="w-full md:w-[400px] flex flex-col glass-panel border-l border-black/5">
+        <div className="p-6 border-b border-black/5 flex justify-between items-center bg-gray-50/50">
+          <h2 className="serif text-xl text-gray-900">Transcripts</h2>
+          <button onClick={clearHistory} className="text-xs text-gray-500 hover:text-gray-800 transition-colors">Clear History</button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center text-gray-600 space-y-4">
-              <div className="w-12 h-12 rounded-full border border-gray-800 flex items-center justify-center">
+              <div className="w-12 h-12 rounded-full border border-gray-200 flex items-center justify-center">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
               </div>
               <p className="text-sm">Your conversation will appear here in real-time.</p>
@@ -287,8 +287,8 @@ const App: React.FC = () => {
               <div key={i} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
                 <div className={`max-w-[85%] rounded-2xl p-4 text-sm ${
                   m.role === 'user' 
-                    ? 'bg-blue-600/10 text-blue-100 border border-blue-500/20 rounded-tr-none' 
-                    : 'bg-white/5 text-gray-300 border border-white/5 rounded-tl-none'
+                    ? 'bg-blue-50 text-blue-900 border border-blue-100 rounded-tr-none' 
+                    : 'bg-gray-100 text-gray-800 border border-gray-200 rounded-tl-none'
                 }`}>
                   <p>{m.text}</p>
                   <span className="text-[10px] text-gray-500 mt-2 block opacity-50">
@@ -300,8 +300,9 @@ const App: React.FC = () => {
           )}
         </div>
 
-        <footer className="p-6 border-t border-white/5 bg-black/40 text-[10px] text-gray-500 text-center uppercase tracking-widest">
-          Potter Padilla & Pfau &bull; Attorneys at Law
+        <footer className="p-6 border-t border-black/5 bg-gray-50/50 text-[10px] text-gray-500 text-center uppercase tracking-widest flex flex-col gap-2">
+          <span className="cinzel">Potter Padilla & Pfau &bull; Attorneys at Law</span>
+          <span className="text-[#1d4ed8]/70 normal-case tracking-normal">This is not legal advice.</span>
         </footer>
       </div>
     </div>

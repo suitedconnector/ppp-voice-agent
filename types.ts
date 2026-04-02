@@ -7,7 +7,7 @@ export interface ConsultationDetails {
   preferredDate: string;
 }
 
-export type Language = 'English' | 'Spanish' | 'Mandarin Chinese';
+export type Language = 'English' | 'Spanish' | 'German';
 
 export interface Message {
   role: 'user' | 'assistant';

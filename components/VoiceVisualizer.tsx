@@ -26,7 +26,7 @@ const VoiceVisualizer: React.FC<VoiceVisualizerProps> = ({ isActive, isSpeaking 
       const radius = 60;
       
       ctx.beginPath();
-      ctx.strokeStyle = isSpeaking ? '#fbbf24' : isActive ? '#60a5fa' : '#4b5563';
+      ctx.strokeStyle = isSpeaking ? '#1d4ed8' : isActive ? '#60a5fa' : '#eab308';
       ctx.lineWidth = 3;
 
       for (let i = 0; i < 360; i++) {
@@ -52,15 +52,15 @@ const VoiceVisualizer: React.FC<VoiceVisualizerProps> = ({ isActive, isSpeaking 
 
   return (
     <div className="relative flex items-center justify-center h-64 w-64 mx-auto">
-      <div className={`absolute inset-0 rounded-full bg-gradient-to-tr from-yellow-900/20 to-blue-900/20 blur-2xl transition-opacity duration-1000 ${isActive ? 'opacity-100' : 'opacity-0'}`} />
+      <div className={`absolute inset-0 rounded-full bg-gradient-to-tr from-[#1d4ed8]/20 to-blue-900/20 blur-2xl transition-opacity duration-1000 ${isActive ? 'opacity-100' : 'opacity-0'}`} />
       <canvas 
         ref={canvasRef} 
         width={300} 
         height={300} 
         className="relative z-10 w-full h-full"
       />
-      <div className={`absolute w-32 h-32 rounded-full glass-panel flex items-center justify-center transition-all duration-500 ${isSpeaking ? 'scale-110 border-yellow-500/50' : 'scale-100'}`}>
-         <div className={`w-16 h-16 rounded-full ${isSpeaking ? 'bg-yellow-600' : isActive ? 'bg-blue-600' : 'bg-gray-700'} transition-colors duration-300 shadow-xl`} />
+      <div className={`absolute w-32 h-32 rounded-full glass-panel flex items-center justify-center transition-all duration-500 ${isSpeaking ? 'scale-110 border-[#1d4ed8]/50' : 'scale-100'}`}>
+         <div className={`w-16 h-16 rounded-full ${isSpeaking ? 'bg-[#1d4ed8]' : isActive ? 'bg-blue-600' : 'bg-yellow-500'} transition-colors duration-300 shadow-xl`} />
       </div>
     </div>
   );
