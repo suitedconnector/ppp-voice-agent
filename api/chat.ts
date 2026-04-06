@@ -1,7 +1,5 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import Anthropic from '@anthropic-ai/sdk';
+export const config = { runtime: 'edge' };
 
-// Inlined from constants.ts — update both files if firm info changes
 const FIRM_INFO = `
 Official Firm Name: Potter Padilla & Pfau (formerly Potter Cohen Samulon & Padilla)
 History: Offering Superb Legal Representation Since 1960. With the retirement of Eliot Samulon, Thelma Cohen, and Joshua Potter, the firm continues as Potter Padilla & Pfau in the same location with much of the same staff who have been with us for more than 25 years.
@@ -113,7 +111,7 @@ STRICT RULES:
 15. Maintain a professional, authoritative, and empathetic tone. Dialogue does not have to be verbatim but must satisfy the flow and rules above.
 `;
 
-const scheduleConsultationTool: Anthropic.Tool = {
+const scheduleConsultationTool = {
   name: 'scheduleConsultation',
   description: 'Capture details to schedule a free legal consultation.',
   input_schema: {
@@ -122,87 +120,95 @@ const scheduleConsultationTool: Anthropic.Tool = {
       name: { type: 'string', description: 'Full name of the client.' },
       phone: { type: 'string', description: 'Contact phone number.' },
       email: { type: 'string', description: 'Contact email address.' },
-      legalIssue: { type: 'string', description: 'Brief description of the legal matter (e.g. social security, employment law).' },
-      preferredDate: { type: 'string', description: "The user's preferred date or time for the consultation." },
+      legalIssue: { type: 'string', description: 'Brief description of the legal matter.' },
+      preferredDate: { type: 'string', description: "The user's preferred date or time." },
     },
     required: ['name', 'phone', 'legalIssue'],
   },
 };
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+export default async function handler(req: Request): Promise<Response> {
+  if (req.method !== 'POST') {
+    return Response.json({ error: 'Method not allowed' }, { status: 405 });
+  }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  if (!apiKey) {
+    return Response.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 });
+  }
 
-  const { messages, language } = req.body as {
+  const { messages, language } = await req.json() as {
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
     language: string;
   };
 
   if (!messages || !language) {
-    return res.status(400).json({ error: 'Missing messages or language' });
+    return Response.json({ error: 'Missing messages or language' }, { status: 400 });
   }
 
-  const client = new Anthropic({ apiKey });
   const systemPrompt = `YOU MUST CONDUCT THIS ENTIRE CONVERSATION IN ${language.toUpperCase()}. ${SYSTEM_INSTRUCTION}\n\n${FIRM_INFO}`;
 
-  try {
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages,
-      tools: [scheduleConsultationTool],
+  const callAnthropic = async (msgs: any[]) => {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: msgs,
+        tools: [scheduleConsultationTool],
+      }),
     });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Anthropic error ${res.status}: ${err}`);
+    }
+    return res.json();
+  };
+
+  try {
+    const response = await callAnthropic(messages);
 
     if (response.stop_reason === 'tool_use') {
-      const toolBlock = response.content.find(
-        (b: any) => b.type === 'tool_use'
-      ) as Anthropic.ToolUseBlock | undefined;
-
+      const toolBlock = response.content.find((b: any) => b.type === 'tool_use');
       if (toolBlock && toolBlock.name === 'scheduleConsultation') {
-        const toolCall = toolBlock.input as {
-          name: string; phone: string; email?: string;
-          legalIssue: string; preferredDate?: string;
-        };
+        const toolCall = toolBlock.input;
 
-        const followUp = await client.messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 1024,
-          system: systemPrompt,
-          messages: [
-            ...messages,
-            { role: 'assistant' as const, content: response.content },
-            {
-              role: 'user' as const,
-              content: [{
-                type: 'tool_result' as const,
-                tool_use_id: toolBlock.id,
-                content: 'Consultation request recorded. I will inform the team at Potter Padilla & Pfau.',
-              }],
-            },
-          ],
-          tools: [scheduleConsultationTool],
-        });
+        const followUp = await callAnthropic([
+          ...messages,
+          { role: 'assistant', content: response.content },
+          {
+            role: 'user',
+            content: [{
+              type: 'tool_result',
+              tool_use_id: toolBlock.id,
+              content: 'Consultation request recorded. I will inform the team at Potter Padilla & Pfau.',
+            }],
+          },
+        ]);
 
         const text = followUp.content
-          .filter((b: any): b is Anthropic.TextBlock => b.type === 'text')
+          .filter((b: any) => b.type === 'text')
           .map((b: any) => b.text)
           .join(' ');
 
-        return res.json({ text, toolCall });
+        return Response.json({ text, toolCall });
       }
     }
 
     const text = response.content
-      .filter((b: any): b is Anthropic.TextBlock => b.type === 'text')
+      .filter((b: any) => b.type === 'text')
       .map((b: any) => b.text)
       .join(' ');
 
-    res.json({ text });
+    return Response.json({ text });
   } catch (err: any) {
     console.error('[api/chat] error:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    return Response.json({ error: err.message || 'Internal server error' }, { status: 500 });
   }
 }

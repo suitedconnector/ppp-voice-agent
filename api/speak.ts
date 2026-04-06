@@ -1,13 +1,19 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+export const config = { runtime: 'edge' };
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-
-  const { text } = req.body as { text: string };
-  if (!text) return res.status(400).json({ error: 'Missing text' });
+export default async function handler(req: Request): Promise<Response> {
+  if (req.method !== 'POST') {
+    return Response.json({ error: 'Method not allowed' }, { status: 405 });
+  }
 
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
+  if (!apiKey) {
+    return Response.json({ error: 'OPENAI_API_KEY not configured' }, { status: 500 });
+  }
+
+  const { text } = await req.json() as { text: string };
+  if (!text) {
+    return Response.json({ error: 'Missing text' }, { status: 400 });
+  }
 
   const voice = process.env.OPENAI_VOICE || 'shimmer';
 
@@ -23,14 +29,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!response.ok) {
       const errText = await response.text();
-      return res.status(response.status).json({ error: errText });
+      return Response.json({ error: errText }, { status: response.status });
     }
 
     const buffer = await response.arrayBuffer();
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.send(Buffer.from(buffer));
-  } catch (err) {
+    return new Response(buffer, {
+      headers: { 'Content-Type': 'audio/mpeg' },
+    });
+  } catch (err: any) {
     console.error('[api/speak] error:', err);
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' });
+    return Response.json({ error: err.message || 'Internal server error' }, { status: 500 });
   }
 }
