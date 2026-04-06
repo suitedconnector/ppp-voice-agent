@@ -1,6 +1,6 @@
 
 import React, { useState, useRef } from 'react';
-import { ConnectionStatus, Message, ConsultationDetails, Language } from './types';
+import { ConnectionStatus, Message, ConsultationDetails, Language, VoicePhase } from './types';
 import VoiceVisualizer from './components/VoiceVisualizer';
 
 const langCode: Record<Language, string> = {
@@ -15,7 +15,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [phase, setPhase] = useState<VoicePhase>('idle');
   const [consultation, setConsultation] = useState<Partial<ConsultationDetails> | null>(null);
   const [language, setLanguage] = useState<Language>('English');
 
@@ -50,6 +50,7 @@ const App: React.FC = () => {
 
       const startListening = () => {
         if (!isConnectedRef.current || isProcessingRef.current) return;
+        setPhase('listening');
         try { recognition.start(); } catch (_) { /* already running */ }
       };
 
@@ -60,7 +61,7 @@ const App: React.FC = () => {
       const speak = async (text: string, onEnd?: () => void) => {
         stopListening();
         if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-        setIsSpeaking(true);
+        setPhase('speaking');
         try {
           const res = await fetch('/api/speak', {
             method: 'POST',
@@ -75,18 +76,18 @@ const App: React.FC = () => {
           const url = URL.createObjectURL(blob);
           const audio = new Audio(url);
           audioRef.current = audio;
-          audio.onended = () => { setIsSpeaking(false); URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
-          audio.onerror = (e) => { console.error('[speak] audio error:', e); setIsSpeaking(false); URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
+          audio.onended = () => { URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
+          audio.onerror = (e) => { console.error('[speak] audio error:', e); URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
           await audio.play();
         } catch (err) {
           console.error('[speak] error:', err);
-          setIsSpeaking(false);
           onEnd?.();
         }
       };
 
       const callChat = async (userText: string) => {
         isProcessingRef.current = true;
+        setPhase('thinking');
         historyRef.current.push({ role: 'user', content: userText });
         setMessages(prev => [...prev, { role: 'user', text: userText, timestamp: Date.now() }]);
 
@@ -130,6 +131,7 @@ const App: React.FC = () => {
           setStatus(ConnectionStatus.ERROR);
           isConnectedRef.current = false;
           isProcessingRef.current = false;
+          setPhase('idle');
         }
       };
 
@@ -153,6 +155,7 @@ const App: React.FC = () => {
         setErrorMessage(`Speech recognition error: ${event.error}`);
         setStatus(ConnectionStatus.ERROR);
         isConnectedRef.current = false;
+        setPhase('idle');
       };
 
       recognition.onend = () => {
@@ -164,6 +167,7 @@ const App: React.FC = () => {
       setStatus(ConnectionStatus.CONNECTED);
 
       // Initial greeting
+      setPhase('thinking');
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -191,6 +195,7 @@ const App: React.FC = () => {
       console.error('Connection failed:', err);
       setErrorMessage(err instanceof Error ? err.message : String(err));
       setStatus(ConnectionStatus.ERROR);
+      setPhase('idle');
     }
   };
 
@@ -205,10 +210,24 @@ const App: React.FC = () => {
       audioRef.current = null;
     }
     setStatus(ConnectionStatus.IDLE);
-    setIsSpeaking(false);
+    setPhase('idle');
   };
 
   const languages: Language[] = ['English', 'Spanish', 'German'];
+
+  const phaseLabel: Record<VoicePhase, string> = {
+    listening: `Listening in ${language}... speak now`,
+    thinking: 'Thinking...',
+    speaking: 'Jazmin is speaking...',
+    idle: '',
+  };
+
+  const phaseColor: Record<VoicePhase, string> = {
+    listening: 'text-green-600',
+    thinking: 'text-yellow-600',
+    speaking: 'text-blue-600',
+    idle: 'text-gray-500',
+  };
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row overflow-hidden bg-white">
@@ -218,7 +237,7 @@ const App: React.FC = () => {
           <p className="text-gray-500 tracking-widest uppercase text-xs">Legal AI Concierge</p>
         </header>
 
-        <VoiceVisualizer isActive={status === ConnectionStatus.CONNECTED} isSpeaking={isSpeaking} />
+        <VoiceVisualizer isActive={phase === 'listening'} isSpeaking={phase === 'speaking'} />
 
         <div className="mt-12 text-center space-y-6 w-full max-w-sm">
           <div className="flex justify-center space-x-2 mb-4">
@@ -238,7 +257,7 @@ const App: React.FC = () => {
             ))}
           </div>
 
-          <div className="glass-panel px-6 py-4 rounded-2xl mx-auto">
+          <div className="glass-panel px-6 py-4 rounded-2xl mx-auto min-h-[64px] flex items-center justify-center">
             {status === ConnectionStatus.IDLE && (
               <p className="text-gray-600 text-sm">
                 {language === 'English' && "Welcome to Potter Padilla & Pfau. I'm here to find out about your legal situation and help schedule your free consultation."}
@@ -247,7 +266,30 @@ const App: React.FC = () => {
               </p>
             )}
             {status === ConnectionStatus.CONNECTED && (
-              <p className="text-blue-600 text-sm animate-pulse">Assistant is listening in {language}...</p>
+              <div className="flex items-center gap-2">
+                {phase === 'listening' && (
+                  <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                  </span>
+                )}
+                {phase === 'thinking' && (
+                  <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-yellow-500"></span>
+                  </span>
+                )}
+                {phase === 'speaking' && (
+                  <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                  </span>
+                )}
+                <p className={`text-sm font-medium ${phaseColor[phase]}`}>{phaseLabel[phase]}</p>
+              </div>
+            )}
+            {status === ConnectionStatus.CONNECTING && (
+              <p className="text-gray-500 text-sm animate-pulse">Connecting...</p>
             )}
             {status === ConnectionStatus.ERROR && (
               <div className="text-red-600 text-sm">

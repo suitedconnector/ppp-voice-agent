@@ -21,3 +21,5 @@ export enum ConnectionStatus {
   CONNECTED = 'CONNECTED',
   ERROR = 'ERROR'
 }
+
+export type VoicePhase = 'listening' | 'thinking' | 'speaking' | 'idle';
