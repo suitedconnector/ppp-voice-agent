@@ -1,28 +1,15 @@
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration } from '@google/genai';
-import { SYSTEM_INSTRUCTION } from './constants';
-import { decode, decodeAudioData, createBlob } from './services/audio-utils';
+import React, { useState, useRef } from 'react';
 import { ConnectionStatus, Message, ConsultationDetails, Language } from './types';
 import VoiceVisualizer from './components/VoiceVisualizer';
 
-const MODEL_NAME = 'gemini-3.1-flash-live-preview';
-
-const scheduleConsultationDeclaration: FunctionDeclaration = {
-  name: 'scheduleConsultation',
-  parameters: {
-    type: Type.OBJECT,
-    description: 'Capture details to schedule a free legal consultation.',
-    properties: {
-      name: { type: Type.STRING, description: 'Full name of the client.' },
-      phone: { type: Type.STRING, description: 'Contact phone number.' },
-      email: { type: Type.STRING, description: 'Contact email address.' },
-      legalIssue: { type: Type.STRING, description: 'Brief description of the legal matter (e.g. social security, employment law).' },
-      preferredDate: { type: Type.STRING, description: 'The user\'s preferred date or time for the consultation.' },
-    },
-    required: ['name', 'phone', 'legalIssue'],
-  },
+const langCode: Record<Language, string> = {
+  English: 'en-US',
+  Spanish: 'es-ES',
+  German: 'de-DE',
 };
+
+type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.IDLE);
@@ -31,154 +18,170 @@ const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [consultation, setConsultation] = useState<Partial<ConsultationDetails> | null>(null);
   const [language, setLanguage] = useState<Language>('English');
-  
-  const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
-  const nextStartTimeRef = useRef(0);
-  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const sessionRef = useRef<any>(null);
-  const transcriptionRef = useRef({ user: '', model: '' });
+
+  const recognitionRef = useRef<any>(null);
+  const historyRef = useRef<ChatMessage[]>([]);
+  const isConnectedRef = useRef(false);
+  const isProcessingRef = useRef(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const clearHistory = () => setMessages([]);
-
-  const handleToolCall = useCallback(async (fc: any) => {
-    if (fc.name === 'scheduleConsultation') {
-      const args = fc.args as ConsultationDetails;
-      setConsultation(args);
-      
-      if (sessionRef.current) {
-        sessionRef.current.sendToolResponse({
-          functionResponses: [{
-            id: fc.id,
-            name: fc.name,
-            response: { result: "Consultation request recorded. I will inform the team at Potter Padilla & Pfau." },
-          }]
-        });
-      }
-      
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        text: `[SYSTEM] Consultation details captured for ${args.name} regarding ${args.legalIssue}.`, 
-        timestamp: Date.now() 
-      }]);
-    }
-  }, []);
 
   const connectVoice = async () => {
     try {
       setStatus(ConnectionStatus.CONNECTING);
       setErrorMessage('');
-      const apiKey = process.env.GEMINI_API_KEY || '';
-      if (!apiKey) {
-        throw new Error("API key is missing. Please ensure it is configured in the environment.");
-      }
-      const ai = new GoogleGenAI({ apiKey });
 
-      const inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      audioContextRef.current = { input: inputAudioContext, output: outputAudioContext };
-
-      if (inputAudioContext.state === 'suspended') await inputAudioContext.resume();
-      if (outputAudioContext.state === 'suspended') await outputAudioContext.resume();
-
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Microphone access is not supported in this browser. Please ensure you are using a secure context (HTTPS) and a modern browser.");
+      const SpeechRecognitionCtor =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SpeechRecognitionCtor) {
+        throw new Error('Speech recognition is not supported in this browser.');
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      const customInstruction = `YOU MUST CONDUCT THIS ENTIRE CONVERSATION IN ${language.toUpperCase()}. ${SYSTEM_INSTRUCTION}`;
+      historyRef.current = [];
+      isConnectedRef.current = true;
+      isProcessingRef.current = false;
 
-      const sessionPromise = ai.live.connect({
-        model: MODEL_NAME,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-          },
-          systemInstruction: customInstruction,
-          tools: [{ functionDeclarations: [scheduleConsultationDeclaration] }],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-        },
-        callbacks: {
-          onopen: () => {
-            setStatus(ConnectionStatus.CONNECTED);
-            
-            // Trigger the initial greeting
-            sessionPromise.then(session => {
-              session.sendRealtimeInput([{ text: "Hello." }]);
-            });
+      const recognition = new SpeechRecognitionCtor();
+      recognition.lang = langCode[language];
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognitionRef.current = recognition;
 
-            const source = inputAudioContext.createMediaStreamSource(stream);
-            const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1);
-            
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const pcmBlob = createBlob(inputData);
-              sessionPromise.then(session => {
-                session.sendRealtimeInput({ audio: pcmBlob });
-              });
-            };
-            
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputAudioContext.destination);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (audioData) {
-              setIsSpeaking(true);
-              const ctx = outputAudioContext;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              const buffer = await decodeAudioData(decode(audioData), ctx, 24000, 1);
-              const source = ctx.createBufferSource();
-              source.buffer = buffer;
-              source.connect(ctx.destination);
-              source.onended = () => {
-                sourcesRef.current.delete(source);
-                if (sourcesRef.current.size === 0) setIsSpeaking(false);
-              };
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += buffer.duration;
-              sourcesRef.current.add(source);
-            }
+      const startListening = () => {
+        if (!isConnectedRef.current || isProcessingRef.current) return;
+        try { recognition.start(); } catch (_) { /* already running */ }
+      };
 
-            if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => s.stop());
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-              setIsSpeaking(false);
-            }
+      const stopListening = () => {
+        try { recognition.stop(); } catch (_) {}
+      };
 
-            if (message.serverContent?.inputTranscription) {
-              transcriptionRef.current.user += message.serverContent.inputTranscription.text;
-            }
-            if (message.serverContent?.outputTranscription) {
-              transcriptionRef.current.model += message.serverContent.outputTranscription.text;
-            }
-            if (message.serverContent?.turnComplete) {
-              const u = transcriptionRef.current.user;
-              const m = transcriptionRef.current.model;
-              if (u) setMessages(prev => [...prev, { role: 'user', text: u, timestamp: Date.now() }]);
-              if (m) setMessages(prev => [...prev, { role: 'assistant', text: m, timestamp: Date.now() }]);
-              transcriptionRef.current = { user: '', model: '' };
-            }
+      const speak = async (text: string, onEnd?: () => void) => {
+        stopListening();
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+        setIsSpeaking(true);
+        try {
+          const res = await fetch('/api/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+          if (!res.ok) {
+            const errText = await res.text();
+            throw new Error(`Speak API error ${res.status}: ${errText}`);
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audioRef.current = audio;
+          audio.onended = () => { setIsSpeaking(false); URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
+          audio.onerror = (e) => { console.error('[speak] audio error:', e); setIsSpeaking(false); URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
+          await audio.play();
+        } catch (err) {
+          console.error('[speak] error:', err);
+          setIsSpeaking(false);
+          onEnd?.();
+        }
+      };
 
-            if (message.toolCall) {
-              message.toolCall.functionCalls.forEach(handleToolCall);
-            }
-          },
-          onerror: (e) => {
-            console.error('Voice Error:', e);
-            setErrorMessage(e instanceof Error ? e.message : String(e));
-            setStatus(ConnectionStatus.ERROR);
-          },
-          onclose: () => {
-            setStatus(ConnectionStatus.IDLE);
+      const callChat = async (userText: string) => {
+        isProcessingRef.current = true;
+        historyRef.current.push({ role: 'user', content: userText });
+        setMessages(prev => [...prev, { role: 'user', text: userText, timestamp: Date.now() }]);
+
+        try {
+          const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: historyRef.current, language }),
+          });
+
+          if (!res.ok) {
+            const errText = await res.text();
+            throw new Error(`Chat API error ${res.status}: ${errText}`);
+          }
+
+          const data = await res.json() as {
+            text: string;
+            toolCall?: ConsultationDetails;
+          };
+
+          if (data.toolCall) {
+            setConsultation(data.toolCall);
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              text: `[SYSTEM] Consultation details captured for ${data.toolCall!.name} regarding ${data.toolCall!.legalIssue}.`,
+              timestamp: Date.now(),
+            }]);
+          }
+
+          if (data.text) {
+            historyRef.current.push({ role: 'assistant', content: data.text });
+            setMessages(prev => [...prev, { role: 'assistant', text: data.text, timestamp: Date.now() }]);
+            speak(data.text, () => { isProcessingRef.current = false; startListening(); });
+          } else {
+            isProcessingRef.current = false;
+            startListening();
+          }
+        } catch (err) {
+          console.error('[callChat] error:', err);
+          setErrorMessage(err instanceof Error ? err.message : String(err));
+          setStatus(ConnectionStatus.ERROR);
+          isConnectedRef.current = false;
+          isProcessingRef.current = false;
+        }
+      };
+
+      recognition.onresult = (event: any) => {
+        if (isProcessingRef.current) return;
+        let finalTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
           }
         }
+        if (finalTranscript.trim()) {
+          stopListening();
+          callChat(finalTranscript.trim());
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === 'no-speech' || event.error === 'aborted') return;
+        console.error('Recognition error:', event.error);
+        setErrorMessage(`Speech recognition error: ${event.error}`);
+        setStatus(ConnectionStatus.ERROR);
+        isConnectedRef.current = false;
+      };
+
+      recognition.onend = () => {
+        if (isConnectedRef.current && !isProcessingRef.current) {
+          setTimeout(startListening, 300);
+        }
+      };
+
+      setStatus(ConnectionStatus.CONNECTED);
+
+      // Initial greeting
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Hello.' }],
+          language,
+        }),
       });
 
-      sessionRef.current = await sessionPromise;
+      const greeting = await res.json() as { text: string };
+      if (greeting.text) {
+        historyRef.current.push({ role: 'user', content: 'Hello.' });
+        historyRef.current.push({ role: 'assistant', content: greeting.text });
+        setMessages(prev => [...prev, { role: 'assistant', text: greeting.text, timestamp: Date.now() }]);
+        speak(greeting.text, startListening);
+      } else {
+        startListening();
+      }
     } catch (err) {
       console.error('Connection failed:', err);
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -187,13 +190,14 @@ const App: React.FC = () => {
   };
 
   const disconnectVoice = () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
+    isConnectedRef.current = false;
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
     }
-    if (audioContextRef.current) {
-      audioContextRef.current.input.close();
-      audioContextRef.current.output.close();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
     }
     setStatus(ConnectionStatus.IDLE);
     setIsSpeaking(false);
@@ -219,8 +223,8 @@ const App: React.FC = () => {
                 onClick={() => setLanguage(lang)}
                 disabled={status !== ConnectionStatus.IDLE}
                 className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-tighter transition-all ${
-                  language === lang 
-                    ? 'bg-[#1d4ed8] text-white shadow-lg shadow-[#1d4ed8]/20' 
+                  language === lang
+                    ? 'bg-[#1d4ed8] text-white shadow-lg shadow-[#1d4ed8]/20'
                     : 'bg-black/5 text-gray-500 hover:text-gray-800'
                 } ${status !== ConnectionStatus.IDLE ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
@@ -252,7 +256,7 @@ const App: React.FC = () => {
             onClick={status === ConnectionStatus.CONNECTED ? disconnectVoice : connectVoice}
             disabled={status === ConnectionStatus.CONNECTING}
             className={`w-full px-12 py-4 rounded-full font-semibold transition-all duration-300 transform hover:scale-105 shadow-2xl ${
-              status === ConnectionStatus.CONNECTED 
+              status === ConnectionStatus.CONNECTED
                 ? 'bg-red-600/20 text-red-400 border border-red-500/50 hover:bg-red-600/30'
                 : 'bg-[#1d4ed8] text-white hover:bg-blue-600 shadow-[#1d4ed8]/40'
             }`}
@@ -282,7 +286,7 @@ const App: React.FC = () => {
                 <p className="font-medium text-gray-900">{consultation.preferredDate || 'Not specified'}</p>
               </div>
             </div>
-            <button 
+            <button
               onClick={() => setConsultation(null)}
               className="mt-6 w-full py-2 bg-[#1d4ed8]/10 text-[#1d4ed8] rounded-lg border border-[#1d4ed8]/20 hover:bg-[#1d4ed8]/20 transition-colors"
             >
@@ -297,7 +301,7 @@ const App: React.FC = () => {
           <h2 className="serif text-xl text-gray-900">Transcripts</h2>
           <button onClick={clearHistory} className="text-xs text-gray-500 hover:text-gray-800 transition-colors">Clear History</button>
         </div>
-        
+
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center text-gray-600 space-y-4">
@@ -310,8 +314,8 @@ const App: React.FC = () => {
             messages.map((m, i) => (
               <div key={i} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
                 <div className={`max-w-[85%] rounded-2xl p-4 text-sm ${
-                  m.role === 'user' 
-                    ? 'bg-blue-50 text-blue-900 border border-blue-100 rounded-tr-none' 
+                  m.role === 'user'
+                    ? 'bg-blue-50 text-blue-900 border border-blue-100 rounded-tr-none'
                     : 'bg-gray-100 text-gray-800 border border-gray-200 rounded-tl-none'
                 }`}>
                   <p>{m.text}</p>
