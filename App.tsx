@@ -173,6 +173,11 @@ const App: React.FC = () => {
         }),
       });
 
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Chat API error ${res.status}: ${errText}`);
+      }
+
       const greeting = await res.json() as { text: string };
       if (greeting.text) {
         historyRef.current.push({ role: 'user', content: 'Hello.' });

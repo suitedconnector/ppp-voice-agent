@@ -2,8 +2,6 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Anthropic from '@anthropic-ai/sdk';
 import { SYSTEM_INSTRUCTION, FIRM_INFO } from '../constants';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 const scheduleConsultationTool: Anthropic.Tool = {
   name: 'scheduleConsultation',
   description: 'Capture details to schedule a free legal consultation.',
@@ -22,6 +20,11 @@ const scheduleConsultationTool: Anthropic.Tool = {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+
+  const client = new Anthropic({ apiKey });
 
   const { messages, language } = req.body as {
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
