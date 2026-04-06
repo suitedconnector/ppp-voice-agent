@@ -127,6 +127,28 @@ const scheduleConsultationTool = {
   },
 };
 
+/**
+ * Extracts complete sentences from a text buffer.
+ * A sentence boundary is [.!?] optionally followed by a closing quote,
+ * then whitespace + an uppercase letter (start of next sentence).
+ * Returns [completeSentences[], remainingText].
+ */
+function extractSentences(buffer: string): [string[], string] {
+  const sentences: string[] = [];
+  let text = buffer;
+
+  while (true) {
+    // Non-greedy match up to first [.!?]["']? followed by space+uppercase
+    const match = text.match(/^([\s\S]*?[.!?]["']?)(?=\s+[A-Z])/);
+    if (!match) break;
+    const sentence = match[1].trim();
+    if (sentence) sentences.push(sentence);
+    text = text.slice(match[0].length).replace(/^\s+/, '');
+  }
+
+  return [sentences, text];
+}
+
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
@@ -147,68 +169,202 @@ export default async function handler(req: Request): Promise<Response> {
   }
 
   const systemPrompt = `YOU MUST CONDUCT THIS ENTIRE CONVERSATION IN ${language.toUpperCase()}. ${SYSTEM_INSTRUCTION}\n\n${FIRM_INFO}`;
+  const encoder = new TextEncoder();
 
-  const callAnthropic = async (msgs: any[]) => {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5',
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: msgs,
-        tools: [scheduleConsultationTool],
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Anthropic error ${res.status}: ${err}`);
-    }
-    return res.json();
-  };
+  const responseStream = new ReadableStream({
+    async start(controller) {
+      const send = (event: string, data: object) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+        );
+      };
 
-  try {
-    const response = await callAnthropic(messages);
+      let textBuffer = '';
+      let fullText = '';
 
-    if (response.stop_reason === 'tool_use') {
-      const toolBlock = response.content.find((b: any) => b.type === 'tool_use');
-      if (toolBlock && toolBlock.name === 'scheduleConsultation') {
-        const toolCall = toolBlock.input;
+      /**
+       * Flush complete sentences from textBuffer as SSE 'sentence' events.
+       * When final=true, also flush any remaining fragment.
+       */
+      const flushSentences = (final = false) => {
+        const [sentences, remaining] = extractSentences(textBuffer);
+        for (const s of sentences) {
+          send('sentence', { text: s });
+          fullText += (fullText ? ' ' : '') + s;
+        }
+        textBuffer = remaining;
 
-        const followUp = await callAnthropic([
-          ...messages,
-          { role: 'assistant', content: response.content },
-          {
-            role: 'user',
-            content: [{
-              type: 'tool_result',
-              tool_use_id: toolBlock.id,
-              content: 'Consultation request recorded. I will inform the team at Potter Padilla & Pfau.',
-            }],
+        if (final && textBuffer.trim()) {
+          send('sentence', { text: textBuffer.trim() });
+          fullText += (fullText ? ' ' : '') + textBuffer.trim();
+          textBuffer = '';
+        }
+      };
+
+      try {
+        const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
           },
-        ]);
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 1024,
+            system: systemPrompt,
+            messages,
+            tools: [scheduleConsultationTool],
+            stream: true,
+          }),
+        });
 
-        const text = followUp.content
-          .filter((b: any) => b.type === 'text')
-          .map((b: any) => b.text)
-          .join(' ');
+        if (!anthropicRes.ok) {
+          const err = await anthropicRes.text();
+          send('error', { message: `Anthropic error ${anthropicRes.status}: ${err}` });
+          controller.close();
+          return;
+        }
 
-        return Response.json({ text, toolCall });
+        const reader = anthropicRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        let currentBlockType: string | null = null;
+        let toolBlock: { id: string; name: string; inputJson: string } | null = null;
+        let stopReason: string | null = null;
+
+        // Parse Anthropic's SSE stream
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const raw = line.slice(6).trim();
+            if (!raw || raw === '[DONE]') continue;
+
+            let evt: any;
+            try { evt = JSON.parse(raw); } catch { continue; }
+
+            switch (evt.type) {
+              case 'content_block_start':
+                currentBlockType = evt.content_block?.type ?? null;
+                if (currentBlockType === 'tool_use') {
+                  toolBlock = {
+                    id: evt.content_block.id,
+                    name: evt.content_block.name,
+                    inputJson: '',
+                  };
+                }
+                break;
+
+              case 'content_block_delta':
+                if (currentBlockType === 'text' && evt.delta?.type === 'text_delta') {
+                  textBuffer += evt.delta.text;
+                  flushSentences(); // emit any newly completed sentences
+                } else if (currentBlockType === 'tool_use' && evt.delta?.type === 'input_json_delta') {
+                  if (toolBlock) toolBlock.inputJson += evt.delta.partial_json;
+                }
+                break;
+
+              case 'content_block_stop':
+                if (currentBlockType === 'text') {
+                  flushSentences(true); // flush final fragment of this text block
+                }
+                currentBlockType = null;
+                break;
+
+              case 'message_delta':
+                stopReason = evt.delta?.stop_reason ?? null;
+                break;
+            }
+          }
+        }
+
+        // Flush any residual text not caught above
+        flushSentences(true);
+
+        // Handle tool use: make a follow-up call with the tool result
+        if (stopReason === 'tool_use' && toolBlock) {
+          let toolInput: any = {};
+          try { toolInput = JSON.parse(toolBlock.inputJson); } catch {}
+
+          send('toolCall', { toolCall: toolInput });
+
+          // Build the assistant content block (text before tool_use + the tool_use block)
+          const assistantContent: any[] = [];
+          if (fullText.trim()) {
+            assistantContent.push({ type: 'text', text: fullText.trim() });
+          }
+          assistantContent.push({
+            type: 'tool_use',
+            id: toolBlock.id,
+            name: toolBlock.name,
+            input: toolInput,
+          });
+
+          const followUpRes = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 1024,
+              system: systemPrompt,
+              messages: [
+                ...messages,
+                { role: 'assistant', content: assistantContent },
+                {
+                  role: 'user',
+                  content: [{
+                    type: 'tool_result',
+                    tool_use_id: toolBlock.id,
+                    content: 'Consultation request recorded. I will inform the team at Potter Padilla & Pfau.',
+                  }],
+                },
+              ],
+              tools: [scheduleConsultationTool],
+            }),
+          });
+
+          if (followUpRes.ok) {
+            const followUpData = await followUpRes.json();
+            const followUpText: string = followUpData.content
+              .filter((b: any) => b.type === 'text')
+              .map((b: any) => b.text)
+              .join(' ');
+
+            if (followUpText) {
+              textBuffer = followUpText;
+              flushSentences(true); // split follow-up into sentences too
+            }
+          }
+        }
+
+        send('done', { fullText: fullText.trim() });
+        controller.close();
+      } catch (err: any) {
+        console.error('[api/chat] error:', err);
+        try {
+          send('error', { message: err.message || 'Internal server error' });
+        } catch {}
+        controller.close();
       }
-    }
+    },
+  });
 
-    const text = response.content
-      .filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
-      .join(' ');
-
-    return Response.json({ text });
-  } catch (err: any) {
-    console.error('[api/chat] error:', err);
-    return Response.json({ error: err.message || 'Internal server error' }, { status: 500 });
-  }
+  return new Response(responseStream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+    },
+  });
 }

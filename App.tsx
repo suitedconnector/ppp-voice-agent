@@ -25,6 +25,13 @@ const App: React.FC = () => {
   const isProcessingRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Streaming audio queue: each entry is a Promise<string> (object URL)
+  // TTS fetches start immediately when a sentence arrives and run in parallel with playback.
+  const audioQueueRef = useRef<Array<Promise<string>>>([]);
+  const isPlayingAudioRef = useRef(false);
+  // Set to true when the SSE 'done' event fires; triggers mic restart once queue drains.
+  const streamDoneRef = useRef(false);
+
   const clearHistory = () => setMessages([]);
 
   const connectVoice = async () => {
@@ -41,12 +48,17 @@ const App: React.FC = () => {
       historyRef.current = [];
       isConnectedRef.current = true;
       isProcessingRef.current = false;
+      audioQueueRef.current = [];
+      isPlayingAudioRef.current = false;
+      streamDoneRef.current = false;
 
       const recognition = new SpeechRecognitionCtor();
       recognition.lang = langCode[language];
       recognition.continuous = true;
       recognition.interimResults = true;
       recognitionRef.current = recognition;
+
+      // ── Mic control ────────────────────────────────────────────────────────
 
       const startListening = () => {
         if (!isConnectedRef.current || isProcessingRef.current) return;
@@ -58,38 +70,111 @@ const App: React.FC = () => {
         try { recognition.stop(); } catch (_) {}
       };
 
-      const speak = async (text: string, onEnd?: () => void) => {
-        stopListening();
-        if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-        setPhase('speaking');
-        try {
-          const res = await fetch('/api/speak', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-          });
-          if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`Speak API error ${res.status}: ${errText}`);
-          }
-          const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-          const audio = new Audio(url);
-          audioRef.current = audio;
-          audio.onended = () => { URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
-          audio.onerror = (e) => { console.error('[speak] audio error:', e); URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
-          await audio.play();
-        } catch (err) {
-          console.error('[speak] error:', err);
-          onEnd?.();
+      // ── Stream / audio coordination ────────────────────────────────────────
+
+      /**
+       * Called when the audio queue drains OR when the SSE 'done' event fires.
+       * Re-enables the mic only once BOTH conditions are true.
+       */
+      const checkAndRestartListening = () => {
+        if (
+          streamDoneRef.current &&
+          !isPlayingAudioRef.current &&
+          audioQueueRef.current.length === 0
+        ) {
+          streamDoneRef.current = false;
+          isProcessingRef.current = false;
+          startListening();
         }
       };
 
-      const callChat = async (userText: string) => {
+      /**
+       * Plays the next audio item from the queue.
+       * Runs recursively until the queue is empty, then calls checkAndRestartListening.
+       */
+      const playNextInQueue = async () => {
+        if (audioQueueRef.current.length === 0) {
+          isPlayingAudioRef.current = false;
+          checkAndRestartListening();
+          return;
+        }
+
+        isPlayingAudioRef.current = true;
+        setPhase('speaking');
+
+        // Each entry is a Promise<objectURL> — the TTS fetch may already be done.
+        const urlPromise = audioQueueRef.current.shift()!;
+
+        try {
+          const url = await urlPromise;
+          if (!isConnectedRef.current) {
+            URL.revokeObjectURL(url);
+            isPlayingAudioRef.current = false;
+            return;
+          }
+          const audio = new Audio(url);
+          audioRef.current = audio;
+          audio.onended = () => {
+            URL.revokeObjectURL(url);
+            audioRef.current = null;
+            playNextInQueue();
+          };
+          audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            audioRef.current = null;
+            playNextInQueue();
+          };
+          await audio.play();
+        } catch (err) {
+          console.error('[playNextInQueue]', err);
+          audioRef.current = null;
+          playNextInQueue();
+        }
+      };
+
+      /**
+       * Kicks off a TTS fetch for `text` immediately (concurrent with any ongoing
+       * playback), then enqueues the resulting object-URL promise.
+       * Starts playback if nothing is currently playing.
+       */
+      const enqueueTTS = (text: string) => {
+        if (!text.trim() || !isConnectedRef.current) return;
+
+        const urlPromise = fetch('/api/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        })
+          .then(r => {
+            if (!r.ok) throw new Error(`TTS ${r.status}`);
+            return r.blob();
+          })
+          .then(blob => URL.createObjectURL(blob));
+
+        audioQueueRef.current.push(urlPromise);
+
+        if (!isPlayingAudioRef.current) {
+          playNextInQueue();
+        }
+      };
+
+      // ── Main chat function ─────────────────────────────────────────────────
+
+      const callChat = async (userText: string, hideFromTranscript = false) => {
+        // Reset queue state for this turn
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+        audioQueueRef.current = [];
+        isPlayingAudioRef.current = false;
+        streamDoneRef.current = false;
         isProcessingRef.current = true;
+
         setPhase('thinking');
         historyRef.current.push({ role: 'user', content: userText });
-        setMessages(prev => [...prev, { role: 'user', text: userText, timestamp: Date.now() }]);
+        if (!hideFromTranscript) {
+          setMessages(prev => [...prev, { role: 'user', text: userText, timestamp: Date.now() }]);
+        }
+
+        let fullResponseText = '';
 
         try {
           const res = await fetch('/api/chat', {
@@ -103,30 +188,82 @@ const App: React.FC = () => {
             throw new Error(`Chat API error ${res.status}: ${errText}`);
           }
 
-          const data = await res.json() as {
-            text: string;
-            toolCall?: ConsultationDetails;
+          const reader = res.body!.getReader();
+          const decoder = new TextDecoder();
+          let lineBuffer = '';
+          let currentEvent = '';
+
+          const handleEvent = (eventType: string, data: any) => {
+            switch (eventType) {
+              case 'sentence':
+                if (data.text) enqueueTTS(data.text);
+                break;
+
+              case 'toolCall':
+                if (data.toolCall) {
+                  setConsultation(data.toolCall);
+                  setMessages(prev => [...prev, {
+                    role: 'assistant',
+                    text: `[SYSTEM] Consultation captured for ${data.toolCall.name} — ${data.toolCall.legalIssue}.`,
+                    timestamp: Date.now(),
+                  }]);
+                }
+                break;
+
+              case 'done':
+                fullResponseText = data.fullText ?? '';
+                if (fullResponseText) {
+                  historyRef.current.push({ role: 'assistant', content: fullResponseText });
+                  setMessages(prev => [...prev, {
+                    role: 'assistant',
+                    text: fullResponseText,
+                    timestamp: Date.now(),
+                  }]);
+                }
+                streamDoneRef.current = true;
+                checkAndRestartListening();
+                break;
+
+              case 'error':
+                throw new Error(data.message ?? 'Stream error');
+            }
           };
 
-          if (data.toolCall) {
-            setConsultation(data.toolCall);
-            setMessages(prev => [...prev, {
-              role: 'assistant',
-              text: `[SYSTEM] Consultation details captured for ${data.toolCall!.name} regarding ${data.toolCall!.legalIssue}.`,
-              timestamp: Date.now(),
-            }]);
+          // Consume the SSE stream
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            lineBuffer += decoder.decode(value, { stream: true });
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              if (line.startsWith('event: ')) {
+                currentEvent = line.slice(7).trim();
+              } else if (line.startsWith('data: ')) {
+                const raw = line.slice(6).trim();
+                if (!raw) continue;
+                let data: any;
+                try { data = JSON.parse(raw); } catch { continue; }
+                handleEvent(currentEvent, data);
+                currentEvent = '';
+              } else if (line.trim() === '') {
+                currentEvent = '';
+              }
+            }
           }
 
-          if (data.text) {
-            historyRef.current.push({ role: 'assistant', content: data.text });
-            setMessages(prev => [...prev, { role: 'assistant', text: data.text, timestamp: Date.now() }]);
-            speak(data.text, () => { isProcessingRef.current = false; startListening(); });
-          } else {
-            isProcessingRef.current = false;
-            startListening();
+          // Process any final partial line
+          if (lineBuffer.startsWith('data: ')) {
+            const raw = lineBuffer.slice(6).trim();
+            if (raw) {
+              try { handleEvent(currentEvent, JSON.parse(raw)); } catch {}
+            }
           }
+
         } catch (err) {
-          console.error('[callChat] error:', err);
+          console.error('[callChat]', err);
           setErrorMessage(err instanceof Error ? err.message : String(err));
           setStatus(ConnectionStatus.ERROR);
           isConnectedRef.current = false;
@@ -134,6 +271,8 @@ const App: React.FC = () => {
           setPhase('idle');
         }
       };
+
+      // ── SpeechRecognition handlers ─────────────────────────────────────────
 
       recognition.onresult = (event: any) => {
         if (isProcessingRef.current) return;
@@ -164,33 +303,11 @@ const App: React.FC = () => {
         }
       };
 
+      // ── Initial greeting ───────────────────────────────────────────────────
+
       setStatus(ConnectionStatus.CONNECTED);
+      await callChat('Hello.', true); // hide "Hello." from the transcript
 
-      // Initial greeting
-      setPhase('thinking');
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: 'Hello.' }],
-          language,
-        }),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Chat API error ${res.status}: ${errText}`);
-      }
-
-      const greeting = await res.json() as { text: string };
-      if (greeting.text) {
-        historyRef.current.push({ role: 'user', content: 'Hello.' });
-        historyRef.current.push({ role: 'assistant', content: greeting.text });
-        setMessages(prev => [...prev, { role: 'assistant', text: greeting.text, timestamp: Date.now() }]);
-        speak(greeting.text, startListening);
-      } else {
-        startListening();
-      }
     } catch (err) {
       console.error('Connection failed:', err);
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -201,6 +318,9 @@ const App: React.FC = () => {
 
   const disconnectVoice = () => {
     isConnectedRef.current = false;
+    streamDoneRef.current = false;
+    audioQueueRef.current = [];
+    isPlayingAudioRef.current = false;
     if (recognitionRef.current) {
       recognitionRef.current.stop();
       recognitionRef.current = null;
@@ -227,6 +347,13 @@ const App: React.FC = () => {
     thinking: 'text-yellow-600',
     speaking: 'text-blue-600',
     idle: 'text-gray-500',
+  };
+
+  const phaseDot: Record<VoicePhase, string> = {
+    listening: 'bg-green-500',
+    thinking: 'bg-yellow-500',
+    speaking: 'bg-blue-500',
+    idle: '',
   };
 
   return (
@@ -265,26 +392,12 @@ const App: React.FC = () => {
                 {language === 'German' && "Willkommen bei Potter Padilla & Pfau. Ich bin hier, um mehr über Ihre rechtliche Situation zu erfahren und Ihnen bei der Vereinbarung Ihrer kostenlosen Beratung zu helfen."}
               </p>
             )}
-            {status === ConnectionStatus.CONNECTED && (
+            {status === ConnectionStatus.CONNECTED && phase !== 'idle' && (
               <div className="flex items-center gap-2">
-                {phase === 'listening' && (
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
-                  </span>
-                )}
-                {phase === 'thinking' && (
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-yellow-500"></span>
-                  </span>
-                )}
-                {phase === 'speaking' && (
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
-                  </span>
-                )}
+                <span className="relative flex h-3 w-3 flex-shrink-0">
+                  <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${phaseDot[phase]}`} />
+                  <span className={`relative inline-flex rounded-full h-3 w-3 ${phaseDot[phase]}`} />
+                </span>
                 <p className={`text-sm font-medium ${phaseColor[phase]}`}>{phaseLabel[phase]}</p>
               </div>
             )}
@@ -308,7 +421,11 @@ const App: React.FC = () => {
                 : 'bg-[#1d4ed8] text-white hover:bg-blue-600 shadow-[#1d4ed8]/40'
             }`}
           >
-            {status === ConnectionStatus.CONNECTED ? 'End Conversation' : status === ConnectionStatus.CONNECTING ? 'Connecting...' : 'Ask a Question'}
+            {status === ConnectionStatus.CONNECTED
+              ? 'End Conversation'
+              : status === ConnectionStatus.CONNECTING
+              ? 'Connecting...'
+              : 'Ask a Question'}
           </button>
         </div>
 
@@ -353,7 +470,9 @@ const App: React.FC = () => {
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center text-gray-600 space-y-4">
               <div className="w-12 h-12 rounded-full border border-gray-200 flex items-center justify-center">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                </svg>
               </div>
               <p className="text-sm">Your conversation will appear here in real-time.</p>
             </div>
