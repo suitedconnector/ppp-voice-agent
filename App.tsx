@@ -289,7 +289,8 @@ const App: React.FC = () => {
       };
 
       recognition.onerror = (event: any) => {
-        if (event.error === 'no-speech' || event.error === 'aborted') return;
+        // Transient errors: let onend fire and restart recognition automatically.
+        if (event.error === 'no-speech' || event.error === 'aborted' || event.error === 'network') return;
         console.error('Recognition error:', event.error);
         setErrorMessage(`Speech recognition error: ${event.error}`);
         setStatus(ConnectionStatus.ERROR);
