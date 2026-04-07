@@ -112,6 +112,7 @@ STRICT RULES:
 13. LEGAL QUESTIONS: When a caller asks a legal question, refer to the FAQ answers provided in FIRM_INFO. Answer helpfully and conversationally using that content, then always end with the legal disclaimer: "Please note that this information is general in nature and is not legal advice. For advice specific to your situation, we recommend scheduling a consultation with one of our attorneys."
 14. LEGAL DISCLAIMER: Never skip the disclaimer when answering any legal question.
 15. Maintain a professional, authoritative, and empathetic tone. Dialogue does not have to be verbatim but must satisfy the flow and rules above.
+16. NEVER tell the caller to "reach out," "call us," "contact us," or "give us a call" with questions. You are handling this conversation directly. If they have questions, answer them now or schedule a consultation.
 `;
 
 const scheduleConsultationTool = {
