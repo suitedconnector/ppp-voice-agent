@@ -24,6 +24,13 @@ const App: React.FC = () => {
   const isConnectedRef = useRef(false);
   const isProcessingRef = useRef(false);
 
+  // Silence-debounce: accumulated final transcript fragments and the pending submit timer.
+  // Chrome fires isFinal after ~1s of silence; our 2s debounce gives ~3s total before submit,
+  // which is enough for mid-sentence pauses like phone numbers ("555... 867... 5309").
+  const pendingTranscriptRef = useRef('');
+  const submitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const SUBMIT_DEBOUNCE_MS = 2000;
+
   // Single AudioContext created on the first user gesture and reused for every playback.
   // This is the only reliable way to play audio on Chrome mobile: resume() in the gesture
   // permanently unlocks the context; all async decoding/playback thereafter is allowed.
@@ -76,11 +83,17 @@ const App: React.FC = () => {
 
       const startListening = () => {
         if (!isConnectedRef.current || isProcessingRef.current) return;
+        // Clear any stale debounce state from the previous turn.
+        pendingTranscriptRef.current = '';
+        if (submitTimerRef.current) { clearTimeout(submitTimerRef.current); submitTimerRef.current = null; }
         setPhase('listening');
         try { recognition.start(); } catch (_) { /* already running */ }
       };
 
       const stopListening = () => {
+        // Cancel any pending debounced submit — the turn is being interrupted or processed.
+        if (submitTimerRef.current) { clearTimeout(submitTimerRef.current); submitTimerRef.current = null; }
+        pendingTranscriptRef.current = '';
         try { recognition.stop(); } catch (_) {}
       };
 
@@ -299,15 +312,34 @@ const App: React.FC = () => {
 
       recognition.onresult = (event: any) => {
         if (isProcessingRef.current) return;
-        let finalTranscript = '';
+
+        let hasInterim = false;
         for (let i = event.resultIndex; i < event.results.length; i++) {
           if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
+            // Accumulate — don't submit yet; the user may resume after a pause.
+            const piece = event.results[i][0].transcript;
+            pendingTranscriptRef.current +=
+              (pendingTranscriptRef.current ? ' ' : '') + piece;
+          } else {
+            hasInterim = true;
           }
         }
-        if (finalTranscript.trim()) {
-          stopListening();
-          callChat(finalTranscript.trim());
+
+        // Any speech activity (interim OR new final fragment) resets the silence timer.
+        // The timer fires only after SUBMIT_DEBOUNCE_MS of true silence.
+        if (pendingTranscriptRef.current.trim()) {
+          if (hasInterim || pendingTranscriptRef.current) {
+            if (submitTimerRef.current) clearTimeout(submitTimerRef.current);
+            submitTimerRef.current = setTimeout(() => {
+              submitTimerRef.current = null;
+              const text = pendingTranscriptRef.current.trim();
+              pendingTranscriptRef.current = '';
+              if (text && !isProcessingRef.current) {
+                stopListening();
+                callChat(text);
+              }
+            }, SUBMIT_DEBOUNCE_MS);
+          }
         }
       };
 
@@ -345,6 +377,8 @@ const App: React.FC = () => {
     streamDoneRef.current = false;
     audioQueueRef.current = [];
     isPlayingAudioRef.current = false;
+    if (submitTimerRef.current) { clearTimeout(submitTimerRef.current); submitTimerRef.current = null; }
+    pendingTranscriptRef.current = '';
     if (recognitionRef.current) {
       recognitionRef.current.stop();
       recognitionRef.current = null;
