@@ -23,11 +23,17 @@ const App: React.FC = () => {
   const historyRef = useRef<ChatMessage[]>([]);
   const isConnectedRef = useRef(false);
   const isProcessingRef = useRef(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Streaming audio queue: each entry is a Promise<string> (object URL)
-  // TTS fetches start immediately when a sentence arrives and run in parallel with playback.
-  const audioQueueRef = useRef<Array<Promise<string>>>([]);
+  // Single AudioContext created on the first user gesture and reused for every playback.
+  // This is the only reliable way to play audio on Chrome mobile: resume() in the gesture
+  // permanently unlocks the context; all async decoding/playback thereafter is allowed.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  // Currently playing source node — kept so we can stop it on disconnect.
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  // Streaming audio queue: each entry is a Promise<ArrayBuffer> (raw TTS audio bytes).
+  // Fetches start immediately when a sentence arrives and run in parallel with playback.
+  const audioQueueRef = useRef<Array<Promise<ArrayBuffer>>>([]);
   const isPlayingAudioRef = useRef(false);
   // Set to true when the SSE 'done' event fires; triggers mic restart once queue drains.
   const streamDoneRef = useRef(false);
@@ -51,6 +57,13 @@ const App: React.FC = () => {
       audioQueueRef.current = [];
       isPlayingAudioRef.current = false;
       streamDoneRef.current = false;
+
+      // ── AudioContext unlock (must happen inside the user gesture) ──────────
+      // Create once; if it already exists from a previous session, just resume it.
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      await audioCtxRef.current.resume(); // unlocks the context on mobile
 
       const recognition = new SpeechRecognitionCtor();
       recognition.lang = langCode[language];
@@ -89,7 +102,9 @@ const App: React.FC = () => {
       };
 
       /**
-       * Plays the next audio item from the queue.
+       * Plays the next audio item from the queue using the shared AudioContext.
+       * Because the context was unlocked during the user gesture, playback here is
+       * allowed even though this runs asynchronously from an onended callback.
        * Runs recursively until the queue is empty, then calls checkAndRestartListening.
        */
       const playNextInQueue = async () => {
@@ -102,56 +117,54 @@ const App: React.FC = () => {
         isPlayingAudioRef.current = true;
         setPhase('speaking');
 
-        // Each entry is a Promise<objectURL> — the TTS fetch may already be done.
-        const urlPromise = audioQueueRef.current.shift()!;
+        // Each entry is a Promise<ArrayBuffer> — the TTS fetch may already be resolved.
+        const bufferPromise = audioQueueRef.current.shift()!;
 
         try {
-          const url = await urlPromise;
+          const arrayBuffer = await bufferPromise;
           if (!isConnectedRef.current) {
-            URL.revokeObjectURL(url);
             isPlayingAudioRef.current = false;
             return;
           }
-          const audio = new Audio(url);
-          audioRef.current = audio;
-          audio.onended = () => {
-            URL.revokeObjectURL(url);
-            audioRef.current = null;
+          const ctx = audioCtxRef.current!;
+          // Keep context alive — it may auto-suspend after inactivity on some browsers.
+          if (ctx.state === 'suspended') await ctx.resume();
+
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(ctx.destination);
+          audioSourceRef.current = source;
+          source.onended = () => {
+            audioSourceRef.current = null;
             playNextInQueue();
           };
-          audio.onerror = () => {
-            URL.revokeObjectURL(url);
-            audioRef.current = null;
-            playNextInQueue();
-          };
-          await audio.play();
+          source.start();
         } catch (err) {
           console.error('[playNextInQueue]', err);
-          audioRef.current = null;
+          audioSourceRef.current = null;
           playNextInQueue();
         }
       };
 
       /**
        * Kicks off a TTS fetch for `text` immediately (concurrent with any ongoing
-       * playback), then enqueues the resulting object-URL promise.
+       * playback), enqueues the ArrayBuffer promise.
        * Starts playback if nothing is currently playing.
        */
       const enqueueTTS = (text: string) => {
         if (!text.trim() || !isConnectedRef.current) return;
 
-        const urlPromise = fetch('/api/speak', {
+        const bufferPromise = fetch('/api/speak', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
-        })
-          .then(r => {
-            if (!r.ok) throw new Error(`TTS ${r.status}`);
-            return r.blob();
-          })
-          .then(blob => URL.createObjectURL(blob));
+        }).then(r => {
+          if (!r.ok) throw new Error(`TTS ${r.status}`);
+          return r.arrayBuffer();
+        });
 
-        audioQueueRef.current.push(urlPromise);
+        audioQueueRef.current.push(bufferPromise);
 
         if (!isPlayingAudioRef.current) {
           playNextInQueue();
@@ -162,7 +175,10 @@ const App: React.FC = () => {
 
       const callChat = async (userText: string, hideFromTranscript = false) => {
         // Reset queue state for this turn
-        if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+        if (audioSourceRef.current) {
+          try { audioSourceRef.current.stop(); } catch {}
+          audioSourceRef.current = null;
+        }
         audioQueueRef.current = [];
         isPlayingAudioRef.current = false;
         streamDoneRef.current = false;
@@ -326,10 +342,11 @@ const App: React.FC = () => {
       recognitionRef.current.stop();
       recognitionRef.current = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+    if (audioSourceRef.current) {
+      try { audioSourceRef.current.stop(); } catch {}
+      audioSourceRef.current = null;
     }
+    // Keep audioCtxRef alive — resume() on next connect re-unlocks it instantly.
     setStatus(ConnectionStatus.IDLE);
     setPhase('idle');
   };
