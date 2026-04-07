@@ -31,9 +31,10 @@ const App: React.FC = () => {
   // Currently playing source node — kept so we can stop it on disconnect.
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
-  // Streaming audio queue: each entry is a Promise<ArrayBuffer> (raw TTS audio bytes).
-  // Fetches start immediately when a sentence arrives and run in parallel with playback.
-  const audioQueueRef = useRef<Array<Promise<ArrayBuffer>>>([]);
+  // Streaming audio queue: each entry is a Promise<AudioBuffer> (already decoded).
+  // Fetch + decode starts immediately when a sentence arrives, concurrent with playback,
+  // so the next sentence is ready the instant the current one ends.
+  const audioQueueRef = useRef<Array<Promise<AudioBuffer>>>([]);
   const isPlayingAudioRef = useRef(false);
   // Set to true when the SSE 'done' event fires; triggers mic restart once queue drains.
   const streamDoneRef = useRef(false);
@@ -102,10 +103,10 @@ const App: React.FC = () => {
       };
 
       /**
-       * Plays the next audio item from the queue using the shared AudioContext.
-       * Because the context was unlocked during the user gesture, playback here is
-       * allowed even though this runs asynchronously from an onended callback.
-       * Runs recursively until the queue is empty, then calls checkAndRestartListening.
+       * Plays the next AudioBuffer from the queue.
+       * The buffer was already decoded by enqueueTTS, so this path is synchronous
+       * after the await — source.start() fires immediately with no decode gap.
+       * Runs recursively until the queue is empty, then restores the mic.
        */
       const playNextInQueue = async () => {
         if (audioQueueRef.current.length === 0) {
@@ -117,20 +118,18 @@ const App: React.FC = () => {
         isPlayingAudioRef.current = true;
         setPhase('speaking');
 
-        // Each entry is a Promise<ArrayBuffer> — the TTS fetch may already be resolved.
-        const bufferPromise = audioQueueRef.current.shift()!;
+        // Each entry is a Promise<AudioBuffer> — decode started in enqueueTTS,
+        // so this await is near-instant for any sentence that arrived before the
+        // previous one finished playing.
+        const audioBufferPromise = audioQueueRef.current.shift()!;
 
         try {
-          const arrayBuffer = await bufferPromise;
+          const audioBuffer = await audioBufferPromise;
           if (!isConnectedRef.current) {
             isPlayingAudioRef.current = false;
             return;
           }
           const ctx = audioCtxRef.current!;
-          // Keep context alive — it may auto-suspend after inactivity on some browsers.
-          if (ctx.state === 'suspended') await ctx.resume();
-
-          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
           const source = ctx.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(ctx.destination);
@@ -148,23 +147,28 @@ const App: React.FC = () => {
       };
 
       /**
-       * Kicks off a TTS fetch for `text` immediately (concurrent with any ongoing
-       * playback), enqueues the ArrayBuffer promise.
-       * Starts playback if nothing is currently playing.
+       * Kicks off a TTS fetch + decode for `text` immediately (concurrent with any
+       * ongoing playback). By the time the current sentence ends, the next AudioBuffer
+       * is already decoded and ready — source.start() fires with near-zero gap.
        */
       const enqueueTTS = (text: string) => {
         if (!text.trim() || !isConnectedRef.current) return;
 
-        const bufferPromise = fetch('/api/speak', {
+        // Capture ctx synchronously — it's always set before any sentence arrives.
+        const ctx = audioCtxRef.current!;
+
+        const audioBufferPromise = fetch('/api/speak', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
-        }).then(r => {
-          if (!r.ok) throw new Error(`TTS ${r.status}`);
-          return r.arrayBuffer();
-        });
+        })
+          .then(r => {
+            if (!r.ok) throw new Error(`TTS ${r.status}`);
+            return r.arrayBuffer();
+          })
+          .then(ab => ctx.decodeAudioData(ab)); // decode immediately, not at play time
 
-        audioQueueRef.current.push(bufferPromise);
+        audioQueueRef.current.push(audioBufferPromise);
 
         if (!isPlayingAudioRef.current) {
           playNextInQueue();
@@ -183,6 +187,9 @@ const App: React.FC = () => {
         isPlayingAudioRef.current = false;
         streamDoneRef.current = false;
         isProcessingRef.current = true;
+
+        // Re-check context once per turn (mobile browsers can auto-suspend it during silence).
+        if (audioCtxRef.current?.state === 'suspended') await audioCtxRef.current.resume();
 
         setPhase('thinking');
         historyRef.current.push({ role: 'user', content: userText });
